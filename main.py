@@ -1,3 +1,4 @@
+#コメントを追加
 import syamu
 import learn
 import tweettest
