@@ -1,0 +1,128 @@
+import unicodedata
+import os
+import sys
+import datetime
+import re
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+import random
+import numpy as np
+from logging import getLogger, StreamHandler, FileHandler, DEBUG, Formatter
+
+from twython import Twython, TwythonError
+from auth import (
+    consumer_key,
+    consumer_secret,
+    access_token,
+    access_token_secret
+)
+
+twitter = Twython(
+    consumer_key,
+    consumer_secret,
+    access_token,
+    access_token_secret
+)
+
+logfilename = "./autoreplylog.txt"
+savefilename = "aisatsu-id.txt"
+replylog = "reply-list.txt"
+
+key_word = "おはよ"
+
+time_reduntance = 5     #時間余裕の設定（分）
+time_start = 7          #返信開始時刻
+time_end = 10           #返信終了時刻
+
+logger = getLogger(__name__)
+handler1 = StreamHandler()
+handler1.setFormatter(Formatter("%(asctime)s %(levelname)8s %(message)s"))
+handler2 = FileHandler(logfilename)
+handler2.setLevel(DEBUG)
+handler2.setFormatter(Formatter("%(asctime)s %(levelname)8s %(message)s"))
+logger.setLevel(DEBUG)
+logger.addHandler(handler1)
+logger.addHandler(handler2)
+logger.propagate = False
+
+def main():
+    dt_now = datetime.datetime.now()
+    dt_start = datetime.datetime(dt_now.year, dt_now.month, dt_now.day, hour=time_start)
+    dt_end = datetime.datetime(dt_now.year, dt_now.month, dt_now.day, hour=time_end, minute=time_reduntance)
+
+    if dt_start <= dt_now <= dt_end:  #返信時間内かどうかの判定
+        with open(savefilename, mode='r') as f:     #定期挨拶ツィートのIDをファイルから取得
+            tweetid = f.readline()
+        try:
+            responses = twitter.get_mentions_timeline(count=30)     #メンションを取得
+        except TwythonError as e:
+            logger.error(e.msg)
+            sys.exit(1)
+        try:
+            followers_ids = twitter.get_followers_ids(stringify_ids=True)     #フォロワーIDリストを取得
+        except TwythonError as e:
+            logger.error(e.msg)
+            sys.exit(1)
+        with open(replylog, mode='r') as f:         
+            alreadylist = f.readlines()
+        alreadylist = [name.rstrip('\n') for name in alreadylist]
+        replylist = alreadylist
+        for response in responses:
+            dt = datetime.datetime.strptime(response['created_at'], '%a %b %d %H:%M:%S +0000 %Y')
+            dt = dt + datetime.timedelta(hours=9)
+            if dt_start < dt < dt_end and response['in_reply_to_status_id_str'] == tweetid:     #指定時間内かつ指定ツィートへの返信か判定
+                usr = response['user']['id_str']
+                if usr in followers_ids['ids'] and not usr in replylist:        #まだ返信していないフォロワーか確認
+                    if key_word in response['text']:                            #返信ツィートにキーワードが含まれているか確認
+                        doReply(response)
+                        replylist.append(usr)
+        with open(replylog, mode='w') as f:     #返信リストのファイルを更新
+            f.write('\n'.join(replylist))
+
+
+def doReply(response):
+    usr_screen_name = response['user']['screen_name']
+    name = nameProcess(response['user']['name'])
+    if name == "":
+        name = usr_screen_name
+    imgpath = genImg(name)
+    text = "@" + usr_screen_name
+    try:
+        image = open(imgpath, "rb")
+        responseimg = twitter.upload_media(media=image)
+        twitter.update_status(status=text, in_reply_to_status_id=response['id'], auto_populate_reply_metadata=True, media_ids=[responseimg['media_id']])
+        logger.info("返信しました: \n{0}\n添付画像: {1}".format(text, imgpath))
+    except TwythonError as te:
+        logger.error(te.msg)
+        sys.exit(1)
+    except FileNotFoundError as fe:
+        logger.error(fe)
+        sys.exit(1)
+
+def nameProcess(name):
+    name = name.rstrip('\n')
+    r = r"[\(（\[<\{＜「『“【［〈｛《〔‘].*?$"
+    if re.sub(r, "", name) == "":
+        r = r"\(.+?\)|（.+?）|\[.+?\]|<.+?>|\{.+?\}|＜.+?＞|「.+?」|『.+?』|“.+?”|【.+?】|［.+?］|〈.+?〉|｛.+?｝|《.+?》|〔.+?〕|‘.+?’"
+    p = re.sub(r, "", name)
+    r = r"[@＠].*?$"
+    if re.sub(r, "", p) == "":
+        r = r"[@＠]"
+    p = re.sub(r, "", p)
+    r = r"[/／\|｜:：].+?$"
+    if re.sub(r, "", p) == "":
+        r = r"[/／\|｜:：]"
+    p = re.sub(r, "", p)
+    r = r"[\u0000-\u007F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65\u3000-\u303F\u3041-\u309F\u30A1-\u30FF\uFF66-\uFF9F\u2E80-\u2FDF\u3005-\u3007\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\U00020000-\U0002EBEF]+"
+    m = re.search(r, p)
+    if m:
+        p = m.group()
+    else:
+        p = ""
+    r = r"[!！]+"
+    p = re.sub(r, "", p)
+    r = r"bot$|Bot$|BOT$"
+    p = re.sub(r, "", p)
+    return p
+
+if __name__ == '__main__':
+    main()
